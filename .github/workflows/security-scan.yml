@@ -1,0 +1,121 @@
+name: Reusable Infra Security Scan
+
+on:
+  workflow_call:
+    inputs:
+      terraform-dir:
+        description: "Terraform working directory"
+        type: string
+        default: "."
+      run-opa:
+        description: "Run OPA/Conftest policies"
+        type: boolean
+        default: true
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ------------------------
+      # Gitleaks
+      # ------------------------
+      - name: Install Gitleaks
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz -o gitleaks.tar.gz
+          tar -xzf gitleaks.tar.gz
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Run Gitleaks
+        run: |
+          gitleaks detect \
+            --source . \
+            --no-git \
+            --redact \
+            --report-format sarif \
+            --report-path gitleaks.sarif \
+            --exit-code 0
+
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gitleaks.sarif
+
+      # ------------------------
+      # Terraform Validation
+      # ------------------------
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init (no backend)
+        working-directory: ${{ inputs.terraform-dir }}
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        working-directory: ${{ inputs.terraform-dir }}
+        run: terraform validate
+
+      # ------------------------
+      # tfsec
+      # ------------------------
+      - name: Install tfsec
+        run: |
+          curl -sSL https://github.com/aquasecurity/tfsec/releases/download/v1.28.4/tfsec-linux-amd64 -o tfsec
+          chmod +x tfsec
+          sudo mv tfsec /usr/local/bin/
+
+      - name: Run tfsec
+        continue-on-error: true
+        run: |
+          mkdir -p reports
+          tfsec . --format sarif --out reports/tfsec.sarif || true
+
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: reports/tfsec.sarif
+
+      # ------------------------
+      # Checkov
+      # ------------------------
+      - name: Install Checkov
+        run: pip install checkov
+
+      - name: Run Checkov
+        continue-on-error: true
+        run: |
+          mkdir -p reports
+          checkov -d . --framework terraform --output sarif --output-file-path reports/checkov.sarif || true
+
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: reports/checkov.sarif
+
+      # ------------------------
+      # Trivy
+      # ------------------------
+      - name: Trivy IaC Scan
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          format: sarif
+          output: trivy.sarif
+
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy.sarif
+
+      # # ------------------------
+      # # OPA / Conftest
+      # # ------------------------
+      # - name: Run OPA Policies
+      #   if: inputs.run-opa
+      #   run: |
+      #     rm -f backend.tf || true
+      #     terraform init -backend=false
+      #     terraform show -json > tfconfig.json
+      #     conftest test tfconfig.json --policy policies/terraform
