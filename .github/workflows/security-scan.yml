@@ -6,7 +6,7 @@ on:
       terraform-dir:
         description: "Terraform working directory"
         type: string
-        default: "."
+
       run-opa:
         description: "Run OPA/Conftest policies"
         type: boolean
